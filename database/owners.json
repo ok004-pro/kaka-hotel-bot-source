@@ -1,0 +1,36 @@
+{
+  "owners": [
+    {
+      "user_name": "송이",
+      "kakao_id": "user_song_dg_tsch_1781",
+      "phone": "010-9337-2553",
+      "room_no": "1004",
+      "status": "active",
+      "role": "Owner"
+    },
+    {
+      "user_name": "홍길동",
+      "kakao_id": "user_hong_test_0001",
+      "phone": "010-9999-8888",
+      "room_no": "1205",
+      "status": "active",
+      "role": "Owner"
+    },
+    {
+      "user_name": "이몽룡",
+      "kakao_id": "user_lee_test_0002",
+      "phone": "010-7777-7777",
+      "room_no": "802",
+      "status": "pending",
+      "role": "Owner"
+    },
+    {
+      "user_name": "성춘향",
+      "kakao_id": "user_sung_test_0003",
+      "phone": "010-5555-4444",
+      "room_no": "1401",
+      "status": "active",
+      "role": "Guest"
+    }
+  ]
+}
