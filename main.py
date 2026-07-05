@@ -10,14 +10,22 @@
 
 import json
 import re
+import os
 from pathlib import Path
 from pydantic import BaseModel
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
+import google.generativeai as genai
 
 app = FastAPI(title="TSCH Hotel Management Kakao Chatbot API", version="1.0.0")
 
+# Setup Gemini API key
+gemini_api_key = os.environ.get("GEMINI_API_KEY")
+if gemini_api_key:
+    genai.configure(api_key=gemini_api_key)
+
 BASE_DIR = Path("C:/Users/PC/Documents/HermesVault/01_Projects/02_Kaka_HotelBot")
+
 OWNERS_DB_PATH = BASE_DIR / "database" / "owners.json"
 VOTES_DB_PATH = BASE_DIR / "database" / "votes.json"
 REGULATION_PATH = BASE_DIR / "knowledge" / "hotel_regulation.txt"
@@ -99,16 +107,6 @@ def kaka_status():
     }
 
 
-@app.get("/kaka/status")
-def kaka_status():
-    """브라우저에서 카카오 스킬 수신 여부를 확인하는 진단 페이지."""
-    return {
-        "status": "ok",
-        "health": "backend_alive",
-        "skill_url": "https://tsch-hotel-bot-2026.loca.lt/chatbot/skill",
-        "recent_events": read_recent_events(30),
-    }
-
 
 # ----------------- 데이터 관리부 -----------------
 
@@ -144,50 +142,139 @@ def get_knowledge_base_path(utterance):
     utterance = utterance.replace(" ", "")
     
     # 1. 법규/규약 중심
-    if any(k in utterance for k in ["규약", "관리단이란", "구분소유자", "의결권", "관리인"]):
+    # 1. 법규/규약 중심
+    if any(k in utterance for k in ["규약", "관리단이란", "구분소유자", "의결권", "관리인", "위원회", "위원", "공용부분", "대지", "사용세칙", "신고의무", "회계"]):
         return BASE_DIR / "knowledge" / "Data_0202_Law"
     
     # 2. 운영/안내 중심
-    if any(k in utterance for k in ["운영", "시간", "방법", "매뉴얼", "안내", "투표"]):
+    if any(k in utterance for k in ["운영", "시간", "방법", "매뉴얼", "안내", "투표", "결산", "수익률"]):
         return BASE_DIR / "knowledge" / "Data_0203_Guide"
     
     # 3. 계약/세금/임금 중심
-    if any(k in utterance for k in ["계약", "세금", "세금계산서", "임금", "정산", "수익"]):
+    if any(k in utterance for k in ["계약", "세금", "세금계산서", "임금", "정산", "수익", "분배금"]):
         return BASE_DIR / "knowledge" / "Data_0204_Contract"
         
-    return BASE_DIR / "knowledge" / "Data_0202_Law"  # 기본값
+    return BASE_DIR / "knowledge" / "Data_0202_Law"  # 기본값 (최우선 규약 검색)
+
+def query_gemini_rag(question, context_text):
+    if not gemini_api_key:
+        return None
+    try:
+        # We will attempt Gemini 2.5 Pro first (highly intelligent), fallback to 1.5 Flash if needed
+        try:
+            model = genai.GenerativeModel("gemini-2.5-pro")
+        except Exception:
+            model = genai.GenerativeModel("gemini-1.5-flash")
+            
+        prompt = f"""당신은 "더스테이클래식명동호텔" 관리단의 똑똑한 가이드 비서 '카카(Kaka)'입니다.
+아래 제공된 [관리단 규약 및 정보] 문맥(Context)에만 철저히 근거하여 사용자의 질문에 답하십시오.
+
+[답변 대원칙]
+1. 극단적 단답 단결형 대원칙: 모바일 가독성을 극대화하기 위해 구구절절 긴 줄글 수식어를 모조리 걷어내고 컴팩트하게 3문장 안팎으로 답변하십시오.
+   (답변 기본 골격: [결론 단답형 대답] -> [근거 조항 상세 기재] -> [별첨 문서 번호 명시] 체계)
+2. 법조 우선순위 및 실 조문 발췌 규칙 (Strict Hierarchy):
+   - 질문의 법적 기준 우선순위는 1순위: 관리단 규약, 2순위: 국가법 (집합건물법) 순서입니다.
+   - 규약에 이미 명시가 끝난 사안의 경우, 답변에 국가법령 이름(집합건물법)을 절대 거론하지 않고 오직 "관리단 규약 몇 조"만 명시해야 합니다.
+   - 구체적인 권리/자격에 관해서는 인위적인 가공 요약문이 아닌, 진짜 규약 조문 텍스트 원문(예: 제3조 5항 가족대리인 준용 범위 등)을 100% 그대로 발췌하여 제공하십시오.
+3. 철통 대외 비밀 차단:
+   - 외부인이나 타인의 민감한 사안(단톡방 갈등 사실, 타 소유주의 명예 수사, 부조리, 불신 저격 내역 등)에 대해서는 정면 대응하지 마십시오.
+   - 비정회원이나 승인 대기 회원의 민감한 대외비(수익률, 결산 등) 질문 시에는 우회하여 "개인정보 및 제88조 비밀유지 조항에 의거하여 답변 드릴 수 없다"는 표준 매크로만 간결하게 뿌립니다.
+4. AI 테스트 꼬리표나 '카카 테스트 OK' 같은 불필요한 사족은 보스님 지시에 따라 일체 출력하지 마십시오. 자연스럽고 신뢰성 있는 답변으로 일관하십시오.
+
+[관리단 규약 및 정보]
+{context_text}
+
+[사용자 질문]
+{question}
+"""
+        response = model.generate_content(prompt)
+        return response.text.strip()
+    except Exception as e:
+        log_event("gemini_error", {"error": str(e)})
+        return None
 
 def search_regulation_rag(question):
     target_folder = get_knowledge_base_path(question)
     
-    # 해당 폴더 내의 모든 .txt 파일을 검색합니다.
     all_content = ""
     for file in target_folder.glob("*.txt"):
-        all_content += file.read_text(encoding="utf-8") + "\n\n"
+        file_content = file.read_text(encoding="utf-8")
+        # DOCX 추출본의 특성을 고려한 더 강력한 정제 로직 추가
+        file_content = re.sub(r'\s*\n\s*\n\s*\n+', '\n\n', file_content) # 3줄 이상 빈 줄은 2줄로
+        file_content = re.sub(r'\s*\n\s*([가-힣]{1,3} \d{1,2} [가-힣])', r'\n\n\1', file_content) # 날짜 패턴 앞에는 빈 줄 추가 (docx에도 남을 수 있음)
+        file_content = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', file_content) # 제어 문자 제거
+        file_content = re.sub(r'\s{2,}', ' ', file_content) # 2칸 이상 공백은 1칸으로
+        file_content = re.sub(r'[\u200b\ufeff]', '', file_content) # Zero-width space 등 유니코드 공백 문자 제거
+        all_content += file_content + "\n\n"
     
     if not all_content:
         return "관련된 지식 정보를 찾을 수 없습니다."
 
-    # 📑 RAG 검색 로직 (기존 유지)
-    clauses = re.split(r'\n(?=제\d+조|---|📄문서 출처)', all_content)
+    # 📑 RAG 검색 로직 (조문 정밀 파싱 및 핵심 정보 추출 강화)
+    # 조문 제목 패턴을 더 다양하게 인식 (예: 제X조, 제X장, <제목>)
+    clauses = re.split(r'\n(?=(제\d+조|제\d+장|\<[가-힣a-zA-Z\s]+\>|---|📄문서 출처))', all_content)
+    
+    # 질문이 특정 조문 번호나 장(Chapter)을 포함하는지 확인 (예: '제1조는?', '제2장은?')
+    match_chapter = re.search(r'제(\d+)(조|장)', question)
+    target_chapter_type = match_chapter.group(2) if match_chapter else None # '조' 또는 '장'
+    target_chapter_num = int(match_chapter.group(1)) if match_chapter else None
+
     keywords = [kw for kw in re.findall(r'[가-힣a-zA-Z\d\.\(\)]+', question) if len(kw) > 1]
     
     scored_clauses = []
-    for clause in clauses:
-        score = sum(3 if kw in clause else 0 for kw in keywords)
+    for i, clause in enumerate(clauses):
+        clause_clean = clause.replace(" ", "")
+        score = sum(3 if kw in clause_clean else 0 for kw in keywords)
         first_lines = "\n".join(clause.splitlines()[:5])
-        score += sum(5 for kw in keywords if kw in first_lines)
-        
+        score += sum(5 if kw in first_lines else 0 for kw in keywords) # 조문 제목 영역 가산점
+
+        # 질문에 특정 조문 번호나 장이 있다면 해당 조문에 큰 가산점
+        if target_chapter_num and target_chapter_type and f'제{target_chapter_num}{target_chapter_type}' in first_lines:
+            score += 100 # 특정 조문/장 일치 시 강력한 가산점
+
+        # 'X이란 Y를 말한다' 같은 정의 패턴 추출 강화 (핵심!)
+        if "이란" in question or "정의" in question or "뜻" in question:
+            definition_matches = re.findall(r'([가-힣a-zA-Z\d\.\(\)]+)(?:이란|라 함은|라 한다)\s*([가-힣a-zA-Z\d\.\(\)\,\s]+(?:\.|입니다|말한다|것이다))', clause)
+            if definition_matches:
+                for term, definition in definition_matches:
+                    if question.replace(" ", "").startswith(term.replace(" ", "")):
+                        score += 50 # 질문과 정의 용어가 일치하면 높은 가산점
+                        break
+
+        # '몇 명', '수', '구성' 같은 수치/구성원 정보 추출 강화
+        if any(k in question for k in ["몇명", "수", "구성"]):
+            if "인으로 구성한다" in clause or "명으로 구성한다" in clause or "인 위원" in clause or "명 위원" in clause:
+                score += 40 # 구성원 수치 정보 포함 시 가산점
+
         if score > 0:
             scored_clauses.append((score, clause.strip()))
             
     if scored_clauses:
         scored_clauses.sort(key=lambda x: x[0], reverse=True)
-        top_matches = [scored_clauses[0][1]]
+        top_clauses = [item[1] for item in scored_clauses[:4]]
+        context_text = "\n\n-------------------\n\n".join(top_clauses)
+        
+        # AI 호출 시도
+        ai_reply = query_gemini_rag(question, context_text)
+        if ai_reply:
+            return ai_reply
+            
+        # 가장 점수가 높은 답변이 특정 조문/장 번호 질문이면 해당 조문만 반환
+        if target_chapter_num and target_chapter_type and f'제{target_chapter_num}{target_chapter_type}' in top_clauses[0]:
+             return top_clauses[0]
+
+        # 답변이 'X이란 Y를 말한다' 정의 패턴을 포함하는지 최종 확인 후 반환
+        if "이란" in question or "정의" in question or "뜻" in question:
+            definition_only = re.search(r'([가-힣a-zA-Z\d\.\(\)]+)(?:이란|라 함은|라 한다)\s*([가-힣a-zA-Z\d\.\(\)\,\s]+(?:\.|입니다|말한다|것이다))', top_clauses[0])
+            if definition_only:
+                return definition_only.group(0) # 정의 문장만 반환
+
+        # 상위 2개 조항까지 포함하여 정밀성 확보 (기존 로직 유지)
         if len(scored_clauses) > 1 and scored_clauses[1][0] > scored_clauses[0][0] * 0.7:
             top_matches.append(scored_clauses[1][1])
         return "\n\n-------------------\n\n".join(top_matches)
     return None
+
 
 # ----------------- 카카오 i 오픈빌더 응답 빌더 -----------------
 
@@ -255,7 +342,7 @@ async def kakao_skill_entry(request: Request):
     # 0. 핵심 자주 묻는 규약 정의: RAG 오매칭 방지를 위해 짧은 원문형 답변 우선 처리
     if any(key in utterance_clean for key in ["관리단이란", "관리단이뭐", "관리단뜻", "관리단정의"]):
         response_text = (
-            "🤖 [카카 테스트 OK / 규약집 검색 AI 답변]\n\n"
+            "더스테이클래식명동호텔 관리단 규약에 근거한 정의입니다:\n\n"
             "관리단은 구분소유자 전원으로 당연 설립되는 단체입니다.\n"
             "■ 기준: 구분소유 관계가 성립되면, 구분소유자 전원을 구성원으로 하여 건물·대지·부속시설 관리사업의 시행을 목적으로 성립합니다.\n"
             "■ 역할: 관리단집회의 의결로 집합건물 관리 관련 중요사항을 결정합니다."
@@ -265,7 +352,7 @@ async def kakao_skill_entry(request: Request):
 
     if any(key in utterance_clean for key in ["관리인이란", "관리인이뭐", "관리인뜻", "관리인정의"]):
         response_text = (
-            "🤖 [카카 테스트 OK / 규약집 검색 AI 답변]\n\n"
+            "더스테이클래식명동호텔 관리단 규약에 근거한 정의입니다:\n\n"
             "관리인은 관리단을 대표하고 관리업무를 집행하는 자입니다.\n"
             "■ 근거: 관리단은 관리단의 사무를 집행할 관리인을 선임합니다.\n"
             "■ 역할: 관리단집회 소집, 관리업무 집행, 구분소유자에 대한 보고 등 관리단 사무를 수행합니다."
@@ -275,7 +362,7 @@ async def kakao_skill_entry(request: Request):
 
     if any(key in utterance_clean for key in ["구분소유자란", "구분소유자에대해", "구분소유자설명", "구분소유자정의"]):
         response_text = (
-            "🤖 [카카 테스트 OK / 규약집 검색 AI 답변]\n\n"
+            "더스테이클래식명동호텔 관리단 규약에 근거한 정의입니다:\n\n"
             "구분소유자는 전유부분을 소유한 사람입니다.\n"
             "■ 근거: 관리단 규약 제3조 정의.\n"
             "■ 기준: 적법한 위임을 받은 가족대리인 또는 사망으로 지위를 승계한 상속인은 규약 적용상 구분소유자와 동일한 권리·의무를 가집니다."
@@ -285,7 +372,7 @@ async def kakao_skill_entry(request: Request):
 
     if any(key in utterance_clean for key in ["호텔운영사는", "운영사는", "위탁운영사", "호텔운영사"]):
         response_text = (
-            "🤖 [카카 테스트 OK / 운영 안내]\n\n"
+            "더스테이클래식명동호텔 위탁 관리 및 운영 안내입니다:\n\n"
             "호텔 운영사는 위탁운영계약에 따라 호텔 영업·객실·예약 등 운영업무를 수행하는 주체입니다.\n"
             "■ 대외비 주의: 계약 세부조건·정산·수익률은 규약 제88조 비밀유지 대상이므로 인증된 구분소유자에게만 안내됩니다."
         )
@@ -302,7 +389,7 @@ async def kakao_skill_entry(request: Request):
     # 대리 참석 / 위임장 전용 가인 조건 RAG 패쓰 처리
     if "대리" in utterance_clean or "위임장" in utterance_clean:
         return make_kakao_text_response(
-            "🤖 [정식 규약 근거 대리권 및 위임장 안내]\n\n"
+            "[정식 규약 근거 대리권 및 위임장 안내]\n\n"
             "더스테이클래식 명동호텔 관리단 규약에 근거한 대리인 소집/의결권 행사 기준은 다음과 같습니다:\n\n"
             "• 근거 조항: 관리단 규약 제49조 (대리인에 의한 의결권 행사 등)\n"
             "• 대리참석 및 의결권 행사는 가능하나, 이전에 의장(또는 관리사무소)에게 대리권을 증명하는 서면 위임장을 반드시 제출하여야 합니다.\n"
@@ -318,7 +405,7 @@ async def kakao_skill_entry(request: Request):
     if is_asking_secret:
         if not has_auth:
             return make_kakao_text_response(
-                "🔒 [진입 거절: 대외비 등급 보안]\n\n"
+                "[진입 거절: 대외비 등급 보안]\n\n"
                 "문의하신 내용은 호텔 규약 제88조 [비밀유지 등]에 준수하는 경영 대외비 데이터입니다.\n"
                 "외부인/Guest 혹은 미인증 회원은 열람 장벽에 저촉됩니다.\n\n"
                 "정식 구분소유자 회원이시라면 최초 1회 [정회원 보안인증] 버튼을 눌러 계정을 안전하게 연동해 주시기 바랍니다.",
@@ -327,7 +414,7 @@ async def kakao_skill_entry(request: Request):
         # 소유자용 정답
         if "회의록" in utterance_clean or "발언록" in utterance_clean:
             return make_kakao_text_response(
-                "🔓 [대외비 열람완료: 구분소유자 검증필]\n\n"
+                "[대외비 열람완료: 구분소유자 검증필]\n\n"
                 f"정회원 {user_name} 소유주님 안녕하세요. 규약 제52조에 근거한 공식 회의록 요약입니다:\n"
                 "• 5월 정기 관리총회 의안 가결:\n"
                 "  1. 냉난방 중앙 배관 보강 교체안 찬성 81%로 임시 가결.\n"
@@ -337,7 +424,7 @@ async def kakao_skill_entry(request: Request):
             )
         if "수익" in utterance_clean or "분배" in utterance_clean or "결산" in utterance_clean:
             return make_kakao_text_response(
-                "🔓 [대외비 열람완료]\n\n"
+                "[대외비 열람완료]\n\n"
                 f"{user_name} 소유주님의 객실 등록 지분(호실: {owner_info.get('room_no')}호) 2026년 정산 결과입니다:\n"
                 "• 2026년 1월분 : 4.11% (2/10 지급 완료)\n"
                 "• 2026년 2월분 : 3.90% (3/10 지급 완료)\n"
@@ -354,11 +441,7 @@ async def kakao_skill_entry(request: Request):
         # 1000자가 넘어가지 않게 카카오톡 메시지 가이드 규격 정제
         if len(rag_result) > 400:
             rag_result = rag_result[:380] + "...\n\n(내용이 길어 중간 생략_규약집 원문 참조)"
-        response_text = (
-            "🤖 [카카 테스트 OK / 규약집 검색 AI 답변]\n\n"
-            f"더스테이클래식명동 정식 규약에 명시된 내용을 전송합니다:\n\n"
-            f"{rag_result}"
-        )
+        response_text = f"{rag_result}"
         log_event("response_ready", {"user_id": user_id, "utterance": utterance, "response_preview": response_text[:180]})
         return make_kakao_text_response(
             response_text,
@@ -367,9 +450,9 @@ async def kakao_skill_entry(request: Request):
 
     # 기본 일상 대화 또는 안내
     response_text = (
-        f"🙋 [카카 테스트 OK] 호텔 관리단 안내 AI 비서 '카카'입니다.\n\n"
-        f"질문하신 '{utterance}'에 대해 규약집과 매칭된 적절한 정밀 법조항을 찾지 못했습니다.\n"
-        f"아래의 주요 메뉴를 참고해 주시거나, 계속 해결이 필요하신 경우 상세 민원을 접수해 주세요."
+        f"안녕하세요, 호텔 관리단 안내 AI 비서 '카카'입니다.\n\n"
+        f"문의하신 '{utterance}' 내용에 대해 규약집 내에서 일치하는 조항을 찾지 못했습니다.\n"
+        f"상세한 안내가 필요하신 경우 관리실 또는 소유자방을 통해 민원을 접수해 주시기 바랍니다."
     )
     log_event("response_ready", {"user_id": user_id, "utterance": utterance, "response_preview": response_text[:180]})
     return make_kakao_text_response(

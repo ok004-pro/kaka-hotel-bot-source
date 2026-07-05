@@ -2,3 +2,5 @@ fastapi
 uvicorn
 pydantic
 requests
+python-docx
+google-generativeai
