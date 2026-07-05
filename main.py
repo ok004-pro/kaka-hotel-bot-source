@@ -24,7 +24,7 @@ gemini_api_key = os.environ.get("GEMINI_API_KEY")
 if gemini_api_key:
     genai.configure(api_key=gemini_api_key)
 
-BASE_DIR = Path("C:/Users/PC/Documents/HermesVault/01_Projects/02_Kaka_HotelBot")
+BASE_DIR = Path(__file__).resolve().parent
 
 OWNERS_DB_PATH = BASE_DIR / "database" / "owners.json"
 VOTES_DB_PATH = BASE_DIR / "database" / "votes.json"
