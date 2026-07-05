@@ -210,41 +210,37 @@ def search_regulation_rag(question):
     if not all_content:
         return "관련된 지식 정보를 찾을 수 없습니다."
 
-    # 📑 RAG 검색 로직 (조문 정밀 파싱 및 핵심 정보 추출 강화)
-    # 조문 제목 패턴을 더 다양하게 인식 (예: 제X조, 제X장, <제목>)
+    # 1. AI API 호출 시도 (가장 최신이고 강력하며 자연스러운 RAG 구현)
+    if gemini_api_key:
+        ai_reply = query_gemini_rag(question, all_content)
+        if ai_reply:
+            return ai_reply
+
+    # 2. API 호출 실패 또는 키 누락 시 기존 룰렛식 폴백 매치 (백업용)
     clauses = re.split(r'\n(?=(제\d+조|제\d+장|\<[가-힣a-zA-Z\s]+\>|---|📄문서 출처))', all_content)
     
-    # 질문이 특정 조문 번호나 장(Chapter)을 포함하는지 확인 (예: '제1조는?', '제2장은?')
     match_chapter = re.search(r'제(\d+)(조|장)', question)
-    target_chapter_type = match_chapter.group(2) if match_chapter else None # '조' 또는 '장'
+    target_chapter_type = match_chapter.group(2) if match_chapter else None
     target_chapter_num = int(match_chapter.group(1)) if match_chapter else None
 
+    # 단순한 글자 매칭용 키워드 분리 보정 (공백 제거 단어 단위도 매칭하도록 보강)
     keywords = [kw for kw in re.findall(r'[가-힣a-zA-Z\d\.\(\)]+', question) if len(kw) > 1]
-    
+    # '이란', '은/는' 등 조사 탈락어 추가
+    sub_keywords = []
+    for kw in keywords:
+        if kw.endswith("이란"): sub_keywords.append(kw[:-2])
+        elif kw.endswith("은") or kw.endswith("는"): sub_keywords.append(kw[:-1])
+    keywords.extend(sub_keywords)
+
     scored_clauses = []
     for i, clause in enumerate(clauses):
         clause_clean = clause.replace(" ", "")
         score = sum(3 if kw in clause_clean else 0 for kw in keywords)
         first_lines = "\n".join(clause.splitlines()[:5])
-        score += sum(5 if kw in first_lines else 0 for kw in keywords) # 조문 제목 영역 가산점
+        score += sum(5 if kw in first_lines else 0 for kw in keywords)
 
-        # 질문에 특정 조문 번호나 장이 있다면 해당 조문에 큰 가산점
         if target_chapter_num and target_chapter_type and f'제{target_chapter_num}{target_chapter_type}' in first_lines:
-            score += 100 # 특정 조문/장 일치 시 강력한 가산점
-
-        # 'X이란 Y를 말한다' 같은 정의 패턴 추출 강화 (핵심!)
-        if "이란" in question or "정의" in question or "뜻" in question:
-            definition_matches = re.findall(r'([가-힣a-zA-Z\d\.\(\)]+)(?:이란|라 함은|라 한다)\s*([가-힣a-zA-Z\d\.\(\)\,\s]+(?:\.|입니다|말한다|것이다))', clause)
-            if definition_matches:
-                for term, definition in definition_matches:
-                    if question.replace(" ", "").startswith(term.replace(" ", "")):
-                        score += 50 # 질문과 정의 용어가 일치하면 높은 가산점
-                        break
-
-        # '몇 명', '수', '구성' 같은 수치/구성원 정보 추출 강화
-        if any(k in question for k in ["몇명", "수", "구성"]):
-            if "인으로 구성한다" in clause or "명으로 구성한다" in clause or "인 위원" in clause or "명 위원" in clause:
-                score += 40 # 구성원 수치 정보 포함 시 가산점
+            score += 100
 
         if score > 0:
             scored_clauses.append((score, clause.strip()))
@@ -252,13 +248,7 @@ def search_regulation_rag(question):
     if scored_clauses:
         scored_clauses.sort(key=lambda x: x[0], reverse=True)
         top_clauses = [item[1] for item in scored_clauses[:4]]
-        context_text = "\n\n-------------------\n\n".join(top_clauses)
         
-        # AI 호출 시도
-        ai_reply = query_gemini_rag(question, context_text)
-        if ai_reply:
-            return ai_reply
-            
         # 가장 점수가 높은 답변이 특정 조문/장 번호 질문이면 해당 조문만 반환
         if target_chapter_num and target_chapter_type and f'제{target_chapter_num}{target_chapter_type}' in top_clauses[0]:
              return top_clauses[0]
@@ -267,13 +257,15 @@ def search_regulation_rag(question):
         if "이란" in question or "정의" in question or "뜻" in question:
             definition_only = re.search(r'([가-힣a-zA-Z\d\.\(\)]+)(?:이란|라 함은|라 한다)\s*([가-힣a-zA-Z\d\.\(\)\,\s]+(?:\.|입니다|말한다|것이다))', top_clauses[0])
             if definition_only:
-                return definition_only.group(0) # 정의 문장만 반환
+                return definition_only.group(0)
 
         # 상위 2개 조항까지 포함하여 정밀성 확보 (기존 로직 유지)
         if len(scored_clauses) > 1 and scored_clauses[1][0] > scored_clauses[0][0] * 0.7:
-            top_matches.append(scored_clauses[1][1])
-        return "\n\n-------------------\n\n".join(top_matches)
-    return None
+            top_matches = [scored_clauses[0][1], scored_clauses[1][1]]
+            return "\n\n-------------------\n\n".join(top_matches)
+        
+    return "요청하신 질문에 관련된 세부 조문을 검색하지 못했습니다. 원본 문서를 참고하시거나 상세 규약집을 재확인해주시기 바랍니다."
+
 
 
 # ----------------- 카카오 i 오픈빌더 응답 빌더 -----------------
