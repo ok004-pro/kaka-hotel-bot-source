@@ -160,11 +160,11 @@ def query_gemini_rag(question, context_text):
     if not gemini_api_key:
         return None
     try:
-        # We will attempt Gemini 2.5 Pro first (highly intelligent), fallback to 1.5 Flash if needed
+        # Enforce highly-optimized, fast models to meet KakaoTalk's strict 5-second timeout rule
         try:
-            model = genai.GenerativeModel("gemini-2.5-pro")
+            model = genai.GenerativeModel("gemini-3.5-flash")
         except Exception:
-            model = genai.GenerativeModel("gemini-1.5-flash")
+            model = genai.GenerativeModel("gemini-2.5-flash")
             
         prompt = f"""당신은 "더스테이클래식명동호텔" 관리단의 똑똑한 가이드 비서 '카카(Kaka)'입니다.
 아래 제공된 [관리단 규약 및 정보] 문맥(Context)에만 철저히 근거하여 사용자의 질문에 답하십시오.
@@ -180,6 +180,7 @@ def query_gemini_rag(question, context_text):
    - 외부인이나 타인의 민감한 사안(단톡방 갈등 사실, 타 소유주의 명예 수사, 부조리, 불신 저격 내역 등)에 대해서는 정면 대응하지 마십시오.
    - 비정회원이나 승인 대기 회원의 민감한 대외비(수익률, 결산 등) 질문 시에는 우회하여 "개인정보 및 제88조 비밀유지 조항에 의거하여 답변 드릴 수 없다"는 표준 매크로만 간결하게 뿌립니다.
 4. AI 테스트 꼬리표나 '카카 테스트 OK' 같은 불필요한 사족은 보스님 지시에 따라 일체 출력하지 마십시오. 자연스럽고 신뢰성 있는 답변으로 일관하십시오.
+5. 분량 제약 대원칙: 답변의 길이는 공백 포함 절대로 한글 400자(카카오 제한선 1000자 수신안정권)를 넘지 않아야 합니다. 핵심만 2초 이내로 대단히 빠르고 콤팩트하게 생성하십시오.
 
 [관리단 규약 및 정보]
 {context_text}
