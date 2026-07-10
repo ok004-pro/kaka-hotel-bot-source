@@ -15,14 +15,21 @@ from pathlib import Path
 from pydantic import BaseModel
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
-import google.generativeai as genai
+from openai import OpenAI
 
 app = FastAPI(title="TSCH Hotel Management Kakao Chatbot API", version="1.0.0")
 
-# Setup Gemini API key
-gemini_api_key = os.environ.get("GEMINI_API_KEY")
-if gemini_api_key:
-    genai.configure(api_key=gemini_api_key)
+# ============================================================
+# DeepSeek V4 Pro (OpenAI 호환 API) 클라이언트 설정
+# 환경변수 DEEPSEEK_API_KEY 가 반드시 설정되어 있어야 합니다.
+# ============================================================
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
+deepseek_client = None
+if DEEPSEEK_API_KEY:
+    deepseek_client = OpenAI(
+        api_key=DEEPSEEK_API_KEY,
+        base_url="https://api.deepseek.com",
+    )
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -156,16 +163,11 @@ def get_knowledge_base_path(utterance):
         
     return BASE_DIR / "knowledge" / "Data_0202_Law"  # 기본값 (최우선 규약 검색)
 
-def query_gemini_rag(question, context_text):
-    if not gemini_api_key:
+def query_deepseek_rag(question, context_text):
+    """DeepSeek V4 Pro 기반 RAG 응답 생성 (OpenAI 호환 Chat Completions API)"""
+    if not deepseek_client:
         return None
     try:
-        # Enforce highly-optimized, fast models to meet KakaoTalk's strict 5-second timeout rule
-        try:
-            model = genai.GenerativeModel("gemini-3.5-flash")
-        except Exception:
-            model = genai.GenerativeModel("gemini-2.5-flash")
-            
         prompt = f"""당신은 "더스테이클래식명동호텔" 관리단의 똑똑한 가이드 비서 '카카(Kaka)'입니다.
 아래 제공된 [관리단 규약 및 정보] 문맥(Context)에만 철저히 근거하여 사용자의 질문에 답하십시오.
 
@@ -188,10 +190,18 @@ def query_gemini_rag(question, context_text):
 [사용자 질문]
 {question}
 """
-        response = model.generate_content(prompt)
-        return response.text.strip()
+        response = deepseek_client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.2,
+            max_tokens=600,
+            timeout=4.5,  # 카카오 5초 타임아웃에 안전 마진
+        )
+        return response.choices[0].message.content.strip()
     except Exception as e:
-        log_event("gemini_error", {"error": str(e)})
+        log_event("deepseek_error", {"error": str(e)})
         return None
 
 def search_regulation_rag(question):
@@ -211,9 +221,9 @@ def search_regulation_rag(question):
     if not all_content:
         return "관련된 지식 정보를 찾을 수 없습니다."
 
-    # 1. AI API 호출 시도 (가장 최신이고 강력하며 자연스러운 RAG 구현)
-    if gemini_api_key:
-        ai_reply = query_gemini_rag(question, all_content)
+    # 1. AI API 호출 시도 (DeepSeek V4 Pro 기반 RAG)
+    if DEEPSEEK_API_KEY:
+        ai_reply = query_deepseek_rag(question, all_content)
         if ai_reply:
             return ai_reply
 
@@ -332,18 +342,21 @@ async def kakao_skill_entry(request: Request):
     # ---------------- 챗봇 시나리오 분기 ----------------
     utterance_clean = utterance.replace(" ", "")
 
+    # RAG 오매칭 및 지연 방지를 위한 고성능 형태소-의도 조합 가인 필터
+    is_asking_definition = any(q in utterance_clean for q in ["뭐", "뜻", "정의", "설명", "개념", "인가", "원문", "기준", "어떻게"])
+
     # 0. 핵심 자주 묻는 규약 정의: RAG 오매칭 방지를 위해 짧은 원문형 답변 우선 처리
-    if any(key in utterance_clean for key in ["관리단이란", "관리단이뭐", "관리단뜻", "관리단정의"]):
+    if "관리단" in utterance_clean and (is_asking_definition or "이란" in utterance_clean):
         response_text = (
             "더스테이클래식명동호텔 관리단 규약에 근거한 정의입니다:\n\n"
             "관리단은 구분소유자 전원으로 당연 설립되는 단체입니다.\n"
-            "■ 기준: 구분소유 관계가 성립되면, 구분소유자 전원을 구성원으로 하여 건물·대지·부속시설 관리사업의 시행을 목적으로 성립합니다.\n"
+            "■ 기준: 구분소유 관계가 성립되면, 구분소유자 전원을 구성원으로 하여 건물·대지·부속시설 관리사업의 시행을 목적으로 설립됩니다.\n"
             "■ 역할: 관리단집회의 의결로 집합건물 관리 관련 중요사항을 결정합니다."
         )
         log_event("response_ready", {"user_id": user_id, "utterance": utterance, "response_preview": response_text[:180]})
         return make_kakao_text_response(response_text, quick_replies=qr)
 
-    if any(key in utterance_clean for key in ["관리인이란", "관리인이뭐", "관리인뜻", "관리인정의"]):
+    if "관리인" in utterance_clean and (is_asking_definition or "이란" in utterance_clean):
         response_text = (
             "더스테이클래식명동호텔 관리단 규약에 근거한 정의입니다:\n\n"
             "관리인은 관리단을 대표하고 관리업무를 집행하는 자입니다.\n"
@@ -353,7 +366,7 @@ async def kakao_skill_entry(request: Request):
         log_event("response_ready", {"user_id": user_id, "utterance": utterance, "response_preview": response_text[:180]})
         return make_kakao_text_response(response_text, quick_replies=qr)
 
-    if any(key in utterance_clean for key in ["구분소유자란", "구분소유자에대해", "구분소유자설명", "구분소유자정의"]):
+    if "구분소유자" in utterance_clean and (is_asking_definition or "이란" in utterance_clean):
         response_text = (
             "더스테이클래식명동호텔 관리단 규약에 근거한 정의입니다:\n\n"
             "구분소유자는 전유부분을 소유한 사람입니다.\n"
@@ -363,7 +376,7 @@ async def kakao_skill_entry(request: Request):
         log_event("response_ready", {"user_id": user_id, "utterance": utterance, "response_preview": response_text[:180]})
         return make_kakao_text_response(response_text, quick_replies=qr)
 
-    if any(key in utterance_clean for key in ["호텔운영사는", "운영사는", "위탁운영사", "호텔운영사"]):
+    if "호텔운영사" in utterance_clean or "위탁운영사" in utterance_clean or ("운영사" in utterance_clean and is_asking_definition):
         response_text = (
             "더스테이클래식명동호텔 위탁 관리 및 운영 안내입니다:\n\n"
             "호텔 운영사는 위탁운영계약에 따라 호텔 영업·객실·예약 등 운영업무를 수행하는 주체입니다.\n"

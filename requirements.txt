@@ -3,4 +3,4 @@ uvicorn
 pydantic
 requests
 python-docx
-google-generativeai
+openai
