@@ -15,21 +15,35 @@ from pathlib import Path
 from pydantic import BaseModel
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
-from openai import OpenAI
+import google.generativeai as genai
 
 app = FastAPI(title="TSCH Hotel Management Kakao Chatbot API", version="1.0.0")
 
 # ============================================================
-# DeepSeek V4 Pro (OpenAI 호환 API) 클라이언트 설정
-# 환경변수 DEEPSEEK_API_KEY 가 반드시 설정되어 있어야 합니다.
+# Gemini 투-트랙 모델 전략 (2026-07-10)
+# - 메인: gemini-2.5-flash-lite (비용 최적화)
+# - 선택: gemini-2.5-flash / gemini-2.5-pro (고성능 필요시)
 # ============================================================
-DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
-deepseek_client = None
-if DEEPSEEK_API_KEY:
-    deepseek_client = OpenAI(
-        api_key=DEEPSEEK_API_KEY,
-        base_url="https://api.deepseek.com",
-    )
+GEMINI_MODELS = {
+    "lite":  "gemini-2.5-flash-lite",   # 메인: 초저비용 일상응답
+    "flash": "gemini-2.5-flash",        # 중간: 복잡한 규약 매칭
+    "pro":   "gemini-2.5-pro",          # 프리미엄: 정밀 법률 해석
+}
+
+# Gemini 모델별 입력/출력 토큰당 비용 (USD, 2026년 7월 기준)
+GEMINI_PRICING = {
+    "lite":  {"input": 0.000_075, "output": 0.000_30},   # $0.075 / $0.30 per 1M
+    "flash": {"input": 0.000_150, "output": 0.000_60},   # $0.15 / $0.60 per 1M
+    "pro":   {"input": 0.001_250, "output": 0.010_00},   # $1.25 / $10.00 per 1M
+}
+KRW_PER_USD = 1500  # 고정 환율
+
+gemini_api_key = os.environ.get("GEMINI_API_KEY")
+if gemini_api_key:
+    genai.configure(api_key=gemini_api_key)
+
+# 세션 누적 비용 추적
+_session_cost_krw = 0.0
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -163,10 +177,44 @@ def get_knowledge_base_path(utterance):
         
     return BASE_DIR / "knowledge" / "Data_0202_Law"  # 기본값 (최우선 규약 검색)
 
-def query_deepseek_rag(question, context_text):
-    """DeepSeek V4 Pro 기반 RAG 응답 생성 (OpenAI 호환 Chat Completions API)"""
-    if not deepseek_client:
-        return None
+def estimate_cost(model_tier, input_chars, estimated_output_chars=400):
+    """모델 사용 전 예상 비용 산출 (환율 1,500원 고정)"""
+    input_tokens = input_chars * 0.5
+    output_tokens = estimated_output_chars * 0.5
+    pricing = GEMINI_PRICING.get(model_tier, GEMINI_PRICING["lite"])
+    cost_usd = (input_tokens * pricing["input"] + output_tokens * pricing["output"]) / 1_000_000
+    cost_krw = cost_usd * KRW_PER_USD
+    return round(cost_krw, 2), round(cost_usd, 6)
+
+def query_gemini_rag(question, context_text, force_model=None):
+    """Gemini 투-트랙 RAG: Lite(기본) → Flash(복잡) → Pro(정밀법률)"""
+    if not gemini_api_key:
+        return None, None, None
+
+    # 모델 선택 로직
+    if force_model:
+        model_tier = force_model
+    else:
+        # 질문 복잡도에 따른 자동 티어 결정
+        complex_keywords = ["소송", "법원", "판례", "해석", "분쟁", "손해배상", "무효", "취소"]
+        medium_keywords = ["절차", "조건", "요건", "제한", "범위", "변경", "승계"]
+        if any(k in question for k in complex_keywords):
+            model_tier = "pro"
+        elif any(k in question for k in medium_keywords):
+            model_tier = "flash"
+        else:
+            model_tier = "lite"
+
+    model_name = GEMINI_MODELS[model_tier]
+
+    # 사전 비용 견적
+    est_krw, est_usd = estimate_cost(model_tier, len(question) + len(context_text))
+
+    log_event("gemini_rag_call", {
+        "model": model_name, "tier": model_tier,
+        "est_cost_krw": est_krw, "question_preview": question[:60]
+    })
+
     try:
         prompt = f"""당신은 "더스테이클래식명동호텔" 관리단의 똑똑한 가이드 비서 '카카(Kaka)'입니다.
 아래 제공된 [관리단 규약 및 정보] 문맥(Context)에만 철저히 근거하여 사용자의 질문에 답하십시오.
@@ -177,12 +225,12 @@ def query_deepseek_rag(question, context_text):
 2. 법조 우선순위 및 실 조문 발췌 규칙 (Strict Hierarchy):
    - 질문의 법적 기준 우선순위는 1순위: 관리단 규약, 2순위: 국가법 (집합건물법) 순서입니다.
    - 규약에 이미 명시가 끝난 사안의 경우, 답변에 국가법령 이름(집합건물법)을 절대 거론하지 않고 오직 "관리단 규약 몇 조"만 명시해야 합니다.
-   - 구체적인 권리/자격에 관해서는 인위적인 가공 요약문이 아닌, 진짜 규약 조문 텍스트 원문(예: 제3조 5항 가족대리인 준용 범위 등)을 100% 그대로 발췌하여 제공하십시오.
+   - 구체적인 권리/자격에 관해서는 인위적인 가공 요약문이 아닌, 진짜 규약 조문 텍스트 원문을 100% 그대로 발췌하여 제공하십시오.
 3. 철통 대외 비밀 차단:
-   - 외부인이나 타인의 민감한 사안(단톡방 갈등 사실, 타 소유주의 명예 수사, 부조리, 불신 저격 내역 등)에 대해서는 정면 대응하지 마십시오.
-   - 비정회원이나 승인 대기 회원의 민감한 대외비(수익률, 결산 등) 질문 시에는 우회하여 "개인정보 및 제88조 비밀유지 조항에 의거하여 답변 드릴 수 없다"는 표준 매크로만 간결하게 뿌립니다.
-4. AI 테스트 꼬리표나 '카카 테스트 OK' 같은 불필요한 사족은 보스님 지시에 따라 일체 출력하지 마십시오. 자연스럽고 신뢰성 있는 답변으로 일관하십시오.
-5. 분량 제약 대원칙: 답변의 길이는 공백 포함 절대로 한글 400자(카카오 제한선 1000자 수신안정권)를 넘지 않아야 합니다. 핵심만 2초 이내로 대단히 빠르고 콤팩트하게 생성하십시오.
+   - 외부인이나 타인의 민감한 사안에 대해서는 정면 대응하지 마십시오.
+   - 비정회원이나 승인 대기 회원의 민감한 대외비 질문 시에는 우회하여 "개인정보 및 제88조 비밀유지 조항에 의거하여 답변 드릴 수 없다"는 표준 매크로만 간결하게 뿌립니다.
+4. AI 테스트 꼬리표나 '카카 테스트 OK' 같은 불필요한 사족은 보스님 지시에 따라 일체 출력하지 마십시오.
+5. 분량 제약 대원칙: 답변의 길이는 공백 포함 절대로 한글 400자를 넘지 않아야 합니다. 핵심만 2초 이내로 빠르고 콤팩트하게 생성하십시오.
 
 [관리단 규약 및 정보]
 {context_text}
@@ -190,19 +238,38 @@ def query_deepseek_rag(question, context_text):
 [사용자 질문]
 {question}
 """
-        response = deepseek_client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.2,
-            max_tokens=600,
-            timeout=4.5,  # 카카오 5초 타임아웃에 안전 마진
-        )
-        return response.choices[0].message.content.strip()
+        model = genai.GenerativeModel(model_name)
+        response = model.generate_content(prompt)
+        reply_text = response.text.strip()
+
+        # ═══════════════════════════════════════════
+        # 토큰·비용 관제 리포트 생성
+        # ═══════════════════════════════════════════
+        try:
+            usage = response.usage_metadata
+            input_tokens = usage.prompt_token_count
+            output_tokens = usage.candidates_token_count
+            total_tokens = usage.total_token_count
+            pricing = GEMINI_PRICING[model_tier]
+            cost_usd = (input_tokens * pricing["input"] + output_tokens * pricing["output"]) / 1_000_000
+            cost_krw = round(cost_usd * KRW_PER_USD, 2)
+            cost_usd = round(cost_usd, 6)
+        except Exception:
+            total_tokens = len(question) + len(context_text) + len(reply_text)
+            cost_krw, cost_usd = est_krw, est_usd
+
+        cost_report = {
+            "model": model_name,
+            "tier": model_tier,
+            "tokens": total_tokens,
+            "cost_krw": cost_krw,
+            "cost_usd": cost_usd,
+        }
+
+        return reply_text, cost_report, model_tier
     except Exception as e:
-        log_event("deepseek_error", {"error": str(e)})
-        return None
+        log_event("gemini_error", {"error": str(e), "tier": model_tier})
+        return None, None, model_tier
 
 def search_regulation_rag(question):
     target_folder = get_knowledge_base_path(question)
@@ -221,11 +288,27 @@ def search_regulation_rag(question):
     if not all_content:
         return "관련된 지식 정보를 찾을 수 없습니다."
 
-    # 1. AI API 호출 시도 (DeepSeek V4 Pro 기반 RAG)
-    if DEEPSEEK_API_KEY:
-        ai_reply = query_deepseek_rag(question, all_content)
+    # 1. AI API 호출 시도 (Gemini 투-트랙 RAG)
+    if gemini_api_key:
+        ai_reply, cost_report, model_tier = query_gemini_rag(question, all_content)
         if ai_reply:
-            return ai_reply
+            global _session_cost_krw
+            _session_cost_krw += cost_report.get("cost_krw", 0)
+
+            # 비용 경고 시스템
+            cost_warning = ""
+            if _session_cost_krw >= 1000:
+                cost_warning = (
+                    "\n\n🚨 [비용 경고] 누적 ₩1,000 초과 (₩{:.0f}) — 새 세션 권장\n"
+                    "핵심 마일스톤: DeepSeek→Gemini 전환 / 투표·보안·RAG 필터 완료"
+                ).format(_session_cost_krw)
+            elif _session_cost_krw >= 500:
+                cost_warning = (
+                    "\n\n⚠️ [비용 경고] 누적 ₩500 초과 (₩{:.0f})\n"
+                    "토큰 사용량: 약 {:,} tokens ({} 모델)"
+                ).format(_session_cost_krw, cost_report.get("tokens", 0), cost_report.get("model", ""))
+
+            return ai_reply + cost_warning
 
     # 2. API 호출 실패 또는 키 누락 시 기존 룰렛식 폴백 매치 (백업용)
     clauses = re.split(r'\n(?=(제\d+조|제\d+장|\<[가-힣a-zA-Z\s]+\>|---|📄문서 출처))', all_content)
